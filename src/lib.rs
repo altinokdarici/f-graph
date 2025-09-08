@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use std::{
     cmp::Ordering,
     collections::{BinaryHeap, HashMap, HashSet, VecDeque},
@@ -94,7 +94,7 @@ impl TaskRunner {
         self
     }
 
-    pub fn add_task(&mut self, node: GraphNode) -> Result<usize> {
+    pub fn add_task(&mut self, node: GraphNode) -> Result<usize, Error> {
         let id = self.nodes.len();
         let priority = node.priority;
 
@@ -135,7 +135,7 @@ impl TaskRunner {
             self.waiting_tasks.insert(id);
         }
 
-        return Ok(id);
+        Ok(id)
     }
 
     fn are_dependencies_met(&self, index: &usize) -> bool {
@@ -331,5 +331,11 @@ impl TaskRunner {
         }
 
         Ok(())
+    }
+}
+
+impl Default for TaskRunner {
+    fn default() -> Self {
+        Self::new()
     }
 }
