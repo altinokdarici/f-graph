@@ -280,7 +280,7 @@ impl FGraph {
             // enqueue children returned by the finished task
             for mut node in children.drain(..) {
                 // default: make each child run after its parent
-                if !node.dependencies.iter().any(|&d| d == finished) {
+                if !node.dependencies.contains(&finished) {
                     node.dependencies.push(finished);
                 }
                 if let Err(e) = self.add_task(node) {

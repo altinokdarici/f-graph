@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
             println!("t1 start");
             sleep(Duration::from_millis(200)).await; // shorter
             println!("t1 done");
-            Ok((vec![]))
+            Ok(vec![])
         })
     });
     let t1_index = runner.add_task(t1)?;
@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
             println!("t2 start");
             sleep(Duration::from_millis(200)).await;
             println!("t2 done");
-            Ok((vec![]))
+            Ok(vec![])
         })
     });
     runner.add_task(t2)?;
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
             println!("t3 start");
             sleep(Duration::from_millis(200)).await;
             println!("t3 done");
-            Ok((vec![]))
+            Ok(vec![])
         })
     });
     runner.add_task(t3)?;
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
             println!("t4 start");
             sleep(Duration::from_millis(200)).await;
             println!("t4 done");
-            Ok((vec![]))
+            Ok(vec![])
         })
     });
 
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
             println!("t5 start");
             sleep(Duration::from_millis(200)).await;
             println!("t5 done");
-            Ok((vec![]))
+            Ok(vec![])
         })
     });
 
