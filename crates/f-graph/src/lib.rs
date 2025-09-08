@@ -207,7 +207,7 @@ impl FGraph {
         );
     }
     pub async fn run_all(&mut self) -> Result<()> {
-        let (tx, mut rx) = mpsc::unbounded_channel::<(usize, Result<()>)>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<(usize, Result<Vec<GraphNode>>)>();
 
         // Pick up tasks that became ready since last run
         self.requeue_waiting_ready();
@@ -255,7 +255,9 @@ impl FGraph {
                 anyhow::bail!("executor channel closed");
             };
 
-            res.with_context(|| format!("task {finished} failed"))?;
+            // res now contains children
+            let mut children = res.with_context(|| format!("task {finished} failed"))?;
+
             self.running_tasks.remove(&finished);
             self.completed_tasks.insert(finished);
 
@@ -272,6 +274,17 @@ impl FGraph {
                             index: dep_index,
                         });
                     }
+                }
+            }
+
+            // enqueue children returned by the finished task
+            for mut node in children.drain(..) {
+                // default: make each child run after its parent
+                if !node.dependencies.iter().any(|&d| d == finished) {
+                    node.dependencies.push(finished);
+                }
+                if let Err(e) = self.add_task(node) {
+                    eprintln!("failed to add child task: {e}");
                 }
             }
         }
@@ -336,7 +349,7 @@ mod tests {
                         event: "end".to_string(),
                         timestamp: Instant::now(),
                     });
-                    Ok(())
+                    Ok(vec![])
                 })
             })
         }
@@ -402,7 +415,7 @@ mod tests {
                         event: "end".to_string(),
                         timestamp: Instant::now(),
                     });
-                    Ok(())
+                    Ok(vec![])
                 })
             }
         });
@@ -424,7 +437,7 @@ mod tests {
                         event: "end".to_string(),
                         timestamp: Instant::now(),
                     });
-                    Ok(())
+                    Ok(vec![])
                 })
             }
         });
@@ -447,7 +460,7 @@ mod tests {
                         event: "end".to_string(),
                         timestamp: Instant::now(),
                     });
-                    Ok(())
+                    Ok(vec![])
                 })
             }
         });
@@ -468,7 +481,7 @@ mod tests {
                         event: "end".to_string(),
                         timestamp: Instant::now(),
                     });
-                    Ok(())
+                    Ok(vec![])
                 })
             }
         });
@@ -493,15 +506,15 @@ mod tests {
     async fn test_cycle_detection_should_fail() {
         let mut runner = FGraph::new();
 
-        let task_a = GraphNode::new(1, Vec::new(), || Box::pin(async { Ok(()) }));
+        let task_a = GraphNode::new(1, Vec::new(), || Box::pin(async { Ok(vec![]) }));
 
-        let task_b = GraphNode::new(1, Vec::new(), || Box::pin(async { Ok(()) }));
+        let task_b = GraphNode::new(1, Vec::new(), || Box::pin(async { Ok(vec![]) }));
 
         let _a_id = runner.add_task(task_a).unwrap();
         let b_id = runner.add_task(task_b).unwrap();
 
         // Create cyclic dependency by trying to add a task that depends on b_id and a_id depends on it
-        let task_c = GraphNode::new(1, vec![b_id], || Box::pin(async { Ok(()) }));
+        let task_c = GraphNode::new(1, vec![b_id], || Box::pin(async { Ok(vec![]) }));
         runner.add_task(task_c).unwrap(); // This should work
 
         // Now modify task_a to depend on the newly added task (creating cycle)
@@ -521,9 +534,9 @@ mod tests {
     async fn test_task_rejection_stops_execution() -> Result<()> {
         let mut runner = FGraph::new();
 
-        let task_a = GraphNode::new(1, Vec::new(), || Box::pin(async { Ok(()) }));
+        let task_a = GraphNode::new(1, Vec::new(), || Box::pin(async { Ok(vec![]) }));
 
-        let task_b = GraphNode::new(1, Vec::new(), || Box::pin(async { Ok(()) }));
+        let task_b = GraphNode::new(1, Vec::new(), || Box::pin(async { Ok(vec![]) }));
 
         let task_c = GraphNode::new(1, Vec::new(), || {
             Box::pin(async {
@@ -578,7 +591,7 @@ mod tests {
                         event: "end".to_string(),
                         timestamp: Instant::now(),
                     });
-                    Ok(())
+                    Ok(vec![])
                 })
             }
         });
@@ -628,7 +641,7 @@ mod tests {
                         event: "end".to_string(),
                         timestamp: Instant::now(),
                     });
-                    Ok(())
+                    Ok(vec![])
                 })
             }
         });
@@ -649,7 +662,7 @@ mod tests {
                         event: "end".to_string(),
                         timestamp: Instant::now(),
                     });
-                    Ok(())
+                    Ok(vec![])
                 })
             }
         });
@@ -698,7 +711,7 @@ mod tests {
                             event: "end".to_string(),
                             timestamp: Instant::now(),
                         });
-                        Ok(())
+                        Ok(vec![])
                     })
                 }
             });
@@ -743,7 +756,7 @@ mod tests {
                         event: "end".to_string(),
                         timestamp: Instant::now(),
                     });
-                    Ok(())
+                    Ok(vec![])
                 })
             }
         });
@@ -764,7 +777,7 @@ mod tests {
                         event: "end".to_string(),
                         timestamp: Instant::now(),
                     });
-                    Ok(())
+                    Ok(vec![])
                 })
             }
         });
@@ -828,7 +841,7 @@ mod tests {
                         event: "end".to_string(),
                         timestamp: Instant::now(),
                     });
-                    Ok(())
+                    Ok(vec![])
                 })
             }
         });

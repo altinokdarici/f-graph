@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-pub type TaskFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+pub type TaskFuture = Pin<Box<dyn Future<Output = Result<Vec<GraphNode>>> + Send>>;
 pub type TaskFn = Arc<dyn Fn() -> TaskFuture + Send + Sync>;
 
 #[derive(Clone)]
