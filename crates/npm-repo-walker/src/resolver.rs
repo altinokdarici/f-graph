@@ -5,20 +5,36 @@
 //! Based on Microsoft CloudPack's findPackage implementation.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 
 use crate::debug_log;
 
-/// Enhanced Node.js module resolution algorithm with symlink support
+// Global cache for canonicalized paths
+static PATH_CACHE: std::sync::LazyLock<Mutex<LruCache<PathBuf, Option<PathBuf>>>> = 
+    std::sync::LazyLock::new(|| {
+        Mutex::new(LruCache::new(NonZeroUsize::new(10000).unwrap()))
+    });
+
+// Global cache for resolved dependency paths
+static RESOLUTION_CACHE: std::sync::LazyLock<Mutex<LruCache<(PathBuf, String), Option<PathBuf>>>> = 
+    std::sync::LazyLock::new(|| {
+        Mutex::new(LruCache::new(NonZeroUsize::new(5000).unwrap()))
+    });
+
+/// Enhanced Node.js module resolution algorithm with symlink support and caching
 ///
 /// Searches for a dependency by name starting from a given path and traversing upward
 /// through the directory structure, checking node_modules folders along the way.
 ///
 /// # Features
-/// - Symlink resolution using fs::canonicalize
+/// - Symlink resolution using fs::canonicalize with LRU cache
 /// - pnpm store layout detection and handling
 /// - Automatic scope folder skipping (e.g., @scope packages)
 /// - Nested node_modules folder handling
 /// - Cross-platform path separator support
+/// - LRU caching for resolved paths
 ///
 /// # Arguments
 /// * `root_path` - Starting directory to search from
@@ -28,6 +44,31 @@ use crate::debug_log;
 /// * `Some(PathBuf)` - Canonicalized path to the resolved package directory
 /// * `None` - Package not found in any accessible node_modules
 pub fn resolve_dependency_path(root_path: &Path, dependency_name: &str) -> Option<PathBuf> {
+    // Check resolution cache first
+    let cache_key = (root_path.to_path_buf(), dependency_name.to_string());
+    if let Ok(mut cache) = RESOLUTION_CACHE.lock() {
+        if let Some(cached_result) = cache.get(&cache_key) {
+            debug_log!(
+                "📋 Cache hit for dependency resolution: {} from {:?}", 
+                dependency_name, 
+                root_path
+            );
+            return cached_result.clone();
+        }
+    }
+    
+    let result = resolve_dependency_path_uncached(root_path, dependency_name);
+    
+    // Cache the result
+    if let Ok(mut cache) = RESOLUTION_CACHE.lock() {
+        cache.put(cache_key, result.clone());
+    }
+    
+    result
+}
+
+/// Internal uncached version of resolve_dependency_path
+fn resolve_dependency_path_uncached(root_path: &Path, dependency_name: &str) -> Option<PathBuf> {
     let mut current_dir = root_path.to_path_buf();
 
     loop {
@@ -55,11 +96,12 @@ pub fn resolve_dependency_path(root_path: &Path, dependency_name: &str) -> Optio
             }
         };
 
-        // Detect if we're in a pnpm store layout
-        let is_store_layout = current_dir.to_string_lossy().contains("/.pnpm/")
-            || current_dir.to_string_lossy().contains("\\.pnpm\\")
-            || current_dir.to_string_lossy().contains("/.store/")
-            || current_dir.to_string_lossy().contains("\\.store\\");
+        // Detect if we're in a pnpm store layout (use single string conversion)
+        let current_dir_str = current_dir.to_string_lossy();
+        let is_store_layout = current_dir_str.contains("/.pnpm/")
+            || current_dir_str.contains("\\.pnpm\\")
+            || current_dir_str.contains("/.store/")
+            || current_dir_str.contains("\\.store\\");
 
         current_dir = parent;
 
@@ -90,10 +132,11 @@ pub fn resolve_dependency_path(root_path: &Path, dependency_name: &str) -> Optio
     None
 }
 
-/// Attempts to resolve a path with symlink support
+/// Attempts to resolve a path with symlink support and caching
 ///
 /// This function checks if a path exists and attempts to canonicalize it to resolve
 /// any symbolic links. It then verifies that a package.json exists at the resolved location.
+/// Results are cached using an LRU cache to improve performance.
 ///
 /// # Arguments
 /// * `path` - The path to resolve and validate
@@ -102,6 +145,30 @@ pub fn resolve_dependency_path(root_path: &Path, dependency_name: &str) -> Optio
 /// * `Some(PathBuf)` - Canonicalized path if valid package found
 /// * `None` - Path doesn't exist, can't be resolved, or doesn't contain package.json
 pub fn try_resolve_with_symlinks(path: &Path) -> Option<PathBuf> {
+    // Check cache first
+    let path_buf = path.to_path_buf();
+    if let Ok(mut cache) = PATH_CACHE.lock() {
+        if let Some(cached_result) = cache.get(&path_buf) {
+            debug_log!(
+                "📋 Cache hit for path resolution: {:?}", 
+                path
+            );
+            return cached_result.clone();
+        }
+    }
+    
+    let result = try_resolve_with_symlinks_uncached(path);
+    
+    // Cache the result
+    if let Ok(mut cache) = PATH_CACHE.lock() {
+        cache.put(path_buf, result.clone());
+    }
+    
+    result
+}
+
+/// Internal uncached version of try_resolve_with_symlinks
+fn try_resolve_with_symlinks_uncached(path: &Path) -> Option<PathBuf> {
     // First check if the path exists
     if !path.exists() {
         return None;
@@ -119,6 +186,29 @@ pub fn try_resolve_with_symlinks(path: &Path) -> Option<PathBuf> {
 
     // Verify package.json exists at the resolved location
     if real_path.join("package.json").exists() {
+        Some(real_path)
+    } else {
+        None
+    }
+}
+
+/// Async version for future use - currently not used to avoid breaking changes
+#[allow(dead_code)]
+async fn try_resolve_with_symlinks_async(path: &Path) -> Option<PathBuf> {
+    // Check if path exists asynchronously
+    if tokio::fs::try_exists(path).await.unwrap_or(false) {
+        return None;
+    }
+
+    // Try to canonicalize (resolve symlinks)
+    let real_path = match tokio::fs::canonicalize(path).await {
+        Ok(resolved) => resolved,
+        Err(_) => path.to_path_buf(),
+    };
+
+    // Verify package.json exists at the resolved location
+    let package_json_path = real_path.join("package.json");
+    if tokio::fs::try_exists(&package_json_path).await.unwrap_or(false) {
         Some(real_path)
     } else {
         None

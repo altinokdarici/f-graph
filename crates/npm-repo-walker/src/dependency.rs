@@ -6,7 +6,7 @@
 use anyhow::Result;
 use f_graph::GraphNode;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::package::PackageJson;
 use crate::{SharedState, debug_log};
@@ -80,7 +80,7 @@ impl DependencyConfig {
 pub fn collect_dependencies(
     package_json: &PackageJson,
     config: &DependencyConfig,
-    package_path: &PathBuf,
+    _package_path: &PathBuf,
 ) -> Vec<TypedDependency> {
     let mut deps = Vec::new();
 
@@ -105,16 +105,12 @@ pub fn collect_dependencies(
                 });
             }
             debug_log!(
-                "🔧 Including {} dev dependencies for package at {:?}",
-                dev_dependencies.len(),
-                package_path
+                "🔧 Including {} dev dependencies",
+                dev_dependencies.len()
             );
         }
     } else {
-        debug_log!(
-            "⏭️  Skipping dev dependencies for external package at {:?}",
-            package_path
-        );
+        debug_log!("⏭️  Skipping dev dependencies for external package");
     }
 
     // Conditionally include optional dependencies
@@ -127,16 +123,12 @@ pub fn collect_dependencies(
                 });
             }
             debug_log!(
-                "🔄 Including {} optional dependencies for package at {:?}",
-                optional_dependencies.len(),
-                package_path
+                "🔄 Including {} optional dependencies",
+                optional_dependencies.len()
             );
         }
     } else {
-        debug_log!(
-            "⏭️  Skipping optional dependencies for package at {:?}",
-            package_path
-        );
+        debug_log!("⏭️  Skipping optional dependencies");
     }
 
     // Conditionally include peer dependencies
@@ -149,16 +141,12 @@ pub fn collect_dependencies(
                 });
             }
             debug_log!(
-                "🤝 Including {} peer dependencies for package at {:?}",
-                peer_dependencies.len(),
-                package_path
+                "🤝 Including {} peer dependencies",
+                peer_dependencies.len()
             );
         }
     } else {
-        debug_log!(
-            "⏭️  Skipping peer dependencies for package at {:?}",
-            package_path
-        );
+        debug_log!("⏭️  Skipping peer dependencies");
     }
 
     deps
@@ -176,7 +164,7 @@ pub fn collect_dependencies(
 pub fn create_resolve_tasks(
     dependencies: Vec<TypedDependency>,
     parent_path: PathBuf,
-    state: Arc<Mutex<SharedState>>,
+    state: Arc<SharedState>,
 ) -> Result<Vec<GraphNode>> {
     let mut child_tasks = Vec::new();
 
@@ -209,7 +197,7 @@ pub fn create_resolve_tasks(
 fn create_resolve_task(
     typed_dependency: TypedDependency,
     parent_path: PathBuf,
-    state: Arc<Mutex<SharedState>>,
+    state: Arc<SharedState>,
 ) -> Result<GraphNode> {
     use crate::resolver::resolve_dependency_path;
 
@@ -241,15 +229,28 @@ fn create_resolve_task(
 
                     // Atomically check and mark as processing using path
                     {
-                        let mut state_guard = state.lock().unwrap();
-                        if state_guard.discovered_paths.contains(&canonical_path)
-                            || state_guard.processing.contains(&canonical_path)
+                        // First check with read locks
                         {
-                            debug_log!("⏭️  Skipping already processed path: {:?}", canonical_path);
-                            return Ok(vec![]);
+                            let discovered_paths = state.discovered_paths.read().unwrap();
+                            let processing = state.processing.read().unwrap();
+                            if discovered_paths.contains(&canonical_path)
+                                || processing.contains(&canonical_path)
+                            {
+                                debug_log!("⏭️  Skipping already processed path: {:?}", canonical_path);
+                                return Ok(vec![]);
+                            }
                         }
-                        // Mark as processing in the same critical section
-                        state_guard.processing.insert(canonical_path.clone());
+                        
+                        // Mark as processing with write lock
+                        {
+                            let mut processing = state.processing.write().unwrap();
+                            // Double-check after acquiring write lock
+                            if processing.contains(&canonical_path) {
+                                debug_log!("⏭️  Skipping already processing path: {:?}", canonical_path);
+                                return Ok(vec![]);
+                            }
+                            processing.insert(canonical_path.clone());
+                        }
                     }
 
                     // Import the create_get_info_task function
@@ -481,16 +482,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_dev_dependency_failure() {
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
         use tempfile::TempDir;
 
         // Create a temp directory structure without the missing dependency
         let temp_dir = TempDir::new().unwrap();
-        let state = Arc::new(Mutex::new(crate::SharedState {
-            discovered: std::collections::HashMap::new(),
-            discovered_paths: std::collections::HashSet::new(),
-            processing: std::collections::HashSet::new(),
-        }));
+        let state = Arc::new(crate::SharedState {
+            discovered: std::sync::RwLock::new(std::collections::HashMap::new()),
+            discovered_paths: std::sync::RwLock::new(std::collections::HashSet::new()),
+            processing: std::sync::RwLock::new(std::collections::HashSet::new()),
+        });
 
         // Create a typed dependency for a non-existent dev dependency
         let missing_dev_dep = TypedDependency {
@@ -519,16 +520,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_dependency_failure() {
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
         use tempfile::TempDir;
 
         // Create a temp directory structure without the missing dependency
         let temp_dir = TempDir::new().unwrap();
-        let state = Arc::new(Mutex::new(crate::SharedState {
-            discovered: std::collections::HashMap::new(),
-            discovered_paths: std::collections::HashSet::new(),
-            processing: std::collections::HashSet::new(),
-        }));
+        let state = Arc::new(crate::SharedState {
+            discovered: std::sync::RwLock::new(std::collections::HashMap::new()),
+            discovered_paths: std::sync::RwLock::new(std::collections::HashSet::new()),
+            processing: std::sync::RwLock::new(std::collections::HashSet::new()),
+        });
 
         // Create a typed dependency for a non-existent runtime dependency
         let missing_runtime_dep = TypedDependency {
@@ -557,16 +558,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_optional_dependency_success() {
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
         use tempfile::TempDir;
 
         // Create a temp directory structure without the missing optional dependency
         let temp_dir = TempDir::new().unwrap();
-        let state = Arc::new(Mutex::new(crate::SharedState {
-            discovered: std::collections::HashMap::new(),
-            discovered_paths: std::collections::HashSet::new(),
-            processing: std::collections::HashSet::new(),
-        }));
+        let state = Arc::new(crate::SharedState {
+            discovered: std::sync::RwLock::new(std::collections::HashMap::new()),
+            discovered_paths: std::sync::RwLock::new(std::collections::HashSet::new()),
+            processing: std::sync::RwLock::new(std::collections::HashSet::new()),
+        });
 
         // Create a typed dependency for a non-existent optional dependency
         let missing_optional_dep = TypedDependency {
@@ -599,16 +600,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_dependency_success() {
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
         use tempfile::TempDir;
 
         // Create a temp directory structure without the missing peer dependency
         let temp_dir = TempDir::new().unwrap();
-        let state = Arc::new(Mutex::new(crate::SharedState {
-            discovered: std::collections::HashMap::new(),
-            discovered_paths: std::collections::HashSet::new(),
-            processing: std::collections::HashSet::new(),
-        }));
+        let state = Arc::new(crate::SharedState {
+            discovered: std::sync::RwLock::new(std::collections::HashMap::new()),
+            discovered_paths: std::sync::RwLock::new(std::collections::HashSet::new()),
+            processing: std::sync::RwLock::new(std::collections::HashSet::new()),
+        });
 
         // Create a typed dependency for a non-existent peer dependency
         let missing_peer_dep = TypedDependency {

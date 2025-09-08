@@ -2,7 +2,7 @@ use anyhow::Result;
 use f_graph::{FGraph, GraphNode};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 mod dependency;
 mod package;
@@ -15,9 +15,8 @@ use package::{Package, read_package_json};
 
 macro_rules! debug_log {
     ($($arg:tt)*) => {
-        if cfg!(debug_assertions) {
-            eprintln!($($arg)*);
-        }
+        #[cfg(debug_assertions)]
+        eprintln!($($arg)*);
     };
 }
 
@@ -26,32 +25,36 @@ pub(crate) use debug_log;
 
 #[derive(Debug)]
 pub struct SharedState {
-    pub discovered: HashMap<String, Package>,
-    pub discovered_paths: HashSet<PathBuf>, // Track packages by canonical path to prevent duplicates
-    pub processing: HashSet<PathBuf>,       // Track packages currently being processed by path
+    pub discovered: RwLock<HashMap<String, Package>>,
+    pub discovered_paths: RwLock<HashSet<PathBuf>>, // Track packages by canonical path to prevent duplicates
+    pub processing: RwLock<HashSet<PathBuf>>,       // Track packages currently being processed by path
 }
 
 #[derive(Debug)]
 pub struct PackageWalker {
     root_path: PathBuf,
-    state: Arc<Mutex<SharedState>>,
+    state: Arc<SharedState>,
     pub(crate) concurrency: usize,
 }
 
 impl PackageWalker {
     pub fn new(root_path: PathBuf) -> Self {
-        Self::with_concurrency(root_path, 4)
+        // Use adaptive concurrency: max of 8 or number of CPU cores
+        let default_concurrency = num_cpus::get().max(8);
+        Self::with_concurrency(root_path, default_concurrency)
     }
 
     pub fn with_concurrency(root_path: PathBuf, concurrency: usize) -> Self {
+        // Ensure minimum concurrency of 2 for reasonable performance
+        let effective_concurrency = concurrency.max(2);
         Self {
             root_path,
-            state: Arc::new(Mutex::new(SharedState {
-                discovered: HashMap::new(),
-                discovered_paths: HashSet::new(),
-                processing: HashSet::new(),
-            })),
-            concurrency,
+            state: Arc::new(SharedState {
+                discovered: RwLock::new(HashMap::new()),
+                discovered_paths: RwLock::new(HashSet::new()),
+                processing: RwLock::new(HashSet::new()),
+            }),
+            concurrency: effective_concurrency,
         }
     }
 
@@ -67,8 +70,8 @@ impl PackageWalker {
         graph.run_all().await?;
         let duration = start.elapsed();
 
-        let state = self.state.lock().unwrap();
-        let package_count = state.discovered.len();
+        let discovered = self.state.discovered.read().unwrap();
+        let package_count = discovered.len();
         let packages_per_second = package_count as f64 / duration.as_secs_f64();
 
         println!(
@@ -78,12 +81,12 @@ impl PackageWalker {
             packages_per_second
         );
 
-        Ok(state.discovered.clone())
+        Ok(discovered.clone())
     }
 
     pub fn create_get_info_task(
         package_path: PathBuf,
-        state: Arc<Mutex<SharedState>>,
+        state: Arc<SharedState>,
     ) -> Result<GraphNode> {
         Ok(GraphNode::new(1, Vec::new(), move || {
             let package_path = package_path.clone();
@@ -115,28 +118,41 @@ impl PackageWalker {
 
                         // Store discovered package in shared state (with path-based deduplication)
                         {
-                            let mut state_guard = state.lock().unwrap();
                             // Use canonical path for deduplication
                             let canonical_path = std::fs::canonicalize(&package_path)
                                 .unwrap_or(package_path.clone());
-                            if !state_guard.discovered_paths.contains(&canonical_path) {
-                                state_guard.discovered_paths.insert(canonical_path.clone());
-                                state_guard.discovered.insert(package.name.clone(), package);
-                                debug_log!(
-                                    "✅ Added package: {} at canonical path: {:?}",
-                                    package_json.name,
-                                    canonical_path
-                                );
-                                // Remove from processing set
-                                state_guard.processing.remove(&canonical_path);
-                            } else {
-                                debug_log!(
-                                    "⏭️  Skipping duplicate package at canonical path: {:?}",
-                                    canonical_path
-                                );
-                                // Remove from processing set
-                                state_guard.processing.remove(&canonical_path);
-                                return Ok(vec![]);
+                                
+                            // Check if already discovered (read lock first)
+                            {
+                                let discovered_paths = state.discovered_paths.read().unwrap();
+                                if discovered_paths.contains(&canonical_path) {
+                                    debug_log!(
+                                        "⏭️  Skipping duplicate package at canonical path: {:?}",
+                                        canonical_path
+                                    );
+                                    // Remove from processing set
+                                    state.processing.write().unwrap().remove(&canonical_path);
+                                    return Ok(vec![]);
+                                }
+                            }
+                            
+                            // Add to discovered state (write locks)
+                            {
+                                let mut discovered_paths = state.discovered_paths.write().unwrap();
+                                let mut discovered = state.discovered.write().unwrap();
+                                let mut processing = state.processing.write().unwrap();
+                                
+                                // Double-check after acquiring write lock
+                                if !discovered_paths.contains(&canonical_path) {
+                                    discovered_paths.insert(canonical_path.clone());
+                                    discovered.insert(package.name.clone(), package);
+                                    debug_log!(
+                                        "✅ Added package: {} at canonical path: {:?}",
+                                        package_json.name,
+                                        canonical_path
+                                    );
+                                }
+                                processing.remove(&canonical_path);
                             }
                         }
 
@@ -168,11 +184,11 @@ impl PackageWalker {
         let path_str = package_path.to_string_lossy();
 
         // Check if this is a package in the .store directory
-        if path_str.contains("/.store/") {
+        if let Some(store_pos) = path_str.find("/.store/") {
             // For .store packages, we need to extract the package name after /node_modules/
-            if let Some(node_modules_pos) = path_str.rfind("/node_modules/") {
-                let package_name_part = &path_str[node_modules_pos + "/node_modules/".len()..];
-                return package_name_part.to_string();
+            if let Some(node_modules_pos) = path_str[store_pos..].find("/node_modules/") {
+                let full_pos = store_pos + node_modules_pos + "/node_modules/".len();
+                return path_str[full_pos..].to_string();
             }
         }
 
@@ -181,8 +197,12 @@ impl PackageWalker {
     }
 
     pub fn get_discovered_packages(&self) -> HashMap<String, Package> {
-        let state = self.state.lock().unwrap();
-        state.discovered.clone()
+        let discovered = self.state.discovered.read().unwrap();
+        discovered.clone()
+    }
+
+    pub fn concurrency(&self) -> usize {
+        self.concurrency
     }
 }
 
@@ -221,7 +241,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let walker = PackageWalker::new(temp_dir.path().to_path_buf());
         assert!(walker.get_discovered_packages().is_empty());
-        assert_eq!(walker.concurrency, 4); // Test default concurrency
+        // Test that default concurrency is at least 8 (adaptive based on CPU cores)
+        assert!(walker.concurrency() >= 8, "Default concurrency should be at least 8, got: {}", walker.concurrency());
     }
 
     #[tokio::test]
@@ -229,7 +250,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let walker = PackageWalker::with_concurrency(temp_dir.path().to_path_buf(), 8);
         assert!(walker.get_discovered_packages().is_empty());
-        assert_eq!(walker.concurrency, 8);
+        assert_eq!(walker.concurrency(), 8);
     }
 
     #[test]
