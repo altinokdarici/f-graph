@@ -1,3 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/f-graph"]
+members = ["crates/f-graph", "crates/npm-repo-walker"]
+
+[workspace.dependencies]
+f-graph = { version = "0.1.0", path = "crates/f-graph" }

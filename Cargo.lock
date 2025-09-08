@@ -120,6 +120,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "npm-repo-walker"
+version = "0.1.0"
+dependencies = [
+ "f-graph",
+]
+
+[[package]]
 name = "object"
 version = "0.36.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
