@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use f_graph::{GraphNode, TaskRunner};
+use f_graph::{FGraph, GraphNode};
 use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let mut runner = TaskRunner::new().with_concurrency(3);
+    let mut runner = FGraph::new().with_concurrency(3);
 
     let t1 = GraphNode::new(1, Vec::new(), || {
         Box::pin(async {

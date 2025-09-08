@@ -1,69 +1,16 @@
+mod graph_node;
+mod heap_node;
+
 use anyhow::{Context, Error, Result};
-use std::{
-    cmp::Ordering,
-    collections::{BinaryHeap, HashMap, HashSet, VecDeque},
-    fmt::{self},
-    future::Future,
-    pin::Pin,
-    sync::Arc,
-};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use tokio::sync::mpsc;
 
-type TaskFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
-type TaskFn = Arc<dyn Fn() -> TaskFuture + Send + Sync>;
+use crate::heap_node::HeapNode;
 
-#[derive(Clone)]
-pub struct GraphNode {
-    pub priority: i32,
-    pub dependencies: Vec<usize>,
-    pub exec: TaskFn,
-}
+// re-export graph node for easy access
+pub use crate::graph_node::{GraphNode, TaskFn, TaskFuture};
 
-// Pretty-print without touching `exec`
-impl fmt::Debug for GraphNode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HashableGraphNode")
-            .field("priority", &self.priority)
-            .field("dependencies", &self.dependencies)
-            .finish_non_exhaustive()
-    }
-}
-
-impl GraphNode {
-    pub fn new<F>(priority: i32, dependencies: Vec<usize>, exec: F) -> Self
-    where
-        F: Fn() -> TaskFuture + Send + Sync + 'static,
-    {
-        GraphNode {
-            priority,
-            dependencies,
-            exec: Arc::new(exec),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HeapNode {
-    priority: i32,
-    index: usize,
-}
-
-// Max-heap: higher priority first; for ties, smaller index first (deterministic)
-impl Ord for HeapNode {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.priority
-            .cmp(&other.priority)
-            .then_with(|| other.index.cmp(&self.index)) // Reverse index order for deterministic behavior
-    }
-}
-
-impl PartialOrd for HeapNode {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-pub struct TaskRunner {
+pub struct FGraph {
     nodes: Vec<GraphNode>,
     reverse_dependencies: HashMap<usize, Vec<usize>>, // index -> Vec of dependent indices
     levels: HashMap<usize, i32>,                      // index -> level
@@ -74,9 +21,9 @@ pub struct TaskRunner {
     concurrency_limit: usize,        // max number of concurrent tasks
 }
 
-impl TaskRunner {
+impl FGraph {
     pub fn new() -> Self {
-        TaskRunner {
+        FGraph {
             nodes: Vec::new(),
             reverse_dependencies: HashMap::new(),
             levels: HashMap::new(),
@@ -221,13 +168,13 @@ impl TaskRunner {
             }
         }
 
-        let mut q: VecDeque<usize> = indeg
+        let mut q: Vec<usize> = indeg
             .iter()
             .filter_map(|(&id, &deg)| (deg == 0).then_some(id))
             .collect();
 
         let mut removed = 0usize;
-        while let Some(u) = q.pop_front() {
+        while let Some(u) = q.pop() {
             removed += 1;
 
             // Decrement indegree of dependents that are also in waiting
@@ -236,7 +183,7 @@ impl TaskRunner {
                     if let Some(deg) = indeg.get_mut(&v) {
                         *deg -= 1;
                         if *deg == 0 {
-                            q.push_back(v);
+                            q.push(v);
                         }
                     }
                 }
@@ -333,7 +280,7 @@ impl TaskRunner {
     }
 }
 
-impl Default for TaskRunner {
+impl Default for FGraph {
     fn default() -> Self {
         Self::new()
     }
@@ -428,7 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dependency_graph_execution_order() -> Result<()> {
-        let mut runner = TaskRunner::new();
+        let mut runner = FGraph::new();
         let scheduler = TestScheduler::new();
 
         // Create tasks: putOnShirt, putOnShorts, putOnJacket, putOnShoes, tieShoes
@@ -544,7 +491,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cycle_detection_should_fail() {
-        let mut runner = TaskRunner::new();
+        let mut runner = FGraph::new();
 
         let task_a = GraphNode::new(1, Vec::new(), || Box::pin(async { Ok(()) }));
 
@@ -565,14 +512,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_graph() -> Result<()> {
-        let mut runner = TaskRunner::new();
+        let mut runner = FGraph::new();
         runner.run_all().await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_task_rejection_stops_execution() -> Result<()> {
-        let mut runner = TaskRunner::new();
+        let mut runner = FGraph::new();
 
         let task_a = GraphNode::new(1, Vec::new(), || Box::pin(async { Ok(()) }));
 
@@ -602,7 +549,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_disconnected_graph_execution() -> Result<()> {
-        let mut runner = TaskRunner::new();
+        let mut runner = FGraph::new();
         let scheduler = TestScheduler::new();
 
         // Create disconnected graph: A -> B, C, and standalone D
@@ -657,7 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_execution() -> Result<()> {
-        let mut runner = TaskRunner::new().with_concurrency(3);
+        let mut runner = FGraph::new().with_concurrency(3);
         let scheduler = TestScheduler::new();
 
         // Create parent task
@@ -724,7 +671,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrency_limit_enforcement() -> Result<()> {
-        let mut runner = TaskRunner::new().with_concurrency(2);
+        let mut runner = FGraph::new().with_concurrency(2);
         let scheduler = TestScheduler::new();
 
         // Create parent task
@@ -772,7 +719,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_priority_scheduling() -> Result<()> {
-        let mut runner = TaskRunner::new().with_concurrency(1);
+        let mut runner = FGraph::new().with_concurrency(1);
         let scheduler = TestScheduler::new();
 
         // Create parent task
@@ -852,7 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_dependencies() -> Result<()> {
-        let mut runner = TaskRunner::new();
+        let mut runner = FGraph::new();
         let scheduler = TestScheduler::new();
 
         // Create tasks A, B, C where D depends on all of them
